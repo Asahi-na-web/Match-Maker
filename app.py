@@ -3,13 +3,13 @@ import pandas as pd
 import json
 import random
 import gspread
+import re
 from google.oauth2.service_account import Credentials
 from itertools import combinations, permutations
 
 # --- ページ設定 & デザイン ---
 st.set_page_config(page_title="MOBA Team Matchmaker", layout="wide")
 
-# カスタムCSSで色遣いを調整
 st.markdown("""
     <style>
     .main { background-color: #f8f9fa; }
@@ -23,29 +23,39 @@ st.markdown("""
 # --- 設定 ---
 ROLES = ["上キャ", "上学習", "中央", "下キャ", "下学習"]
 
-# --- Google Sheets 接続設定 ---
+# --- Google Sheets 接続設定（キャッシュ化） ---
+@st.cache_resource
 def get_gspread_client():
-    scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-    credentials = Credentials.from_service_account_info(creds_dict, scopes=scope)
-    return gspread.authorize(credentials)
+    try:
+        scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
+        creds_dict = dict(st.secrets["gcp_service_account"])
+        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+        credentials = Credentials.from_service_account_info(creds_dict, scopes=scope)
+        return gspread.authorize(credentials)
+    except Exception as e:
+        st.error(f"認証エラー: {e}")
+        return None
 
 def load_from_sheets():
     try:
         client = get_gspread_client()
+        if not client: return {}
         sheet = client.open_by_url(st.secrets["spreadsheet_url"]).sheet1
         records = sheet.get_all_records()
         data = {}
         for r in records:
+            try:
+                roles_list = json.loads(r['roles']) if r['roles'] else ROLES.copy()
+            except:
+                roles_list = ROLES.copy()
             data[r['name']] = {
                 'active': bool(r['active']),
-                'wins': int(r['wins']),
-                'total': int(r['total']),
-                'omw': float(r['omw']),
-                'last_teammates': json.loads(r['last_teammates']) if r['last_teammates'] else [],
-                'opponents': json.loads(r['opponents']) if r['opponents'] else [],
-                'roles': json.loads(r['roles'])
+                'wins': int(r['wins'] or 0),
+                'total': int(r['total'] or 0),
+                'omw': float(r['omw'] or 0.0),
+                'last_teammates': json.loads(r['last_teammates']) if r.get('last_teammates') else [],
+                'opponents': json.loads(r['opponents']) if r.get('opponents') else [],
+                'roles': roles_list
             }
         return data
     except Exception as e:
@@ -55,6 +65,7 @@ def load_from_sheets():
 def save_to_sheets(players):
     try:
         client = get_gspread_client()
+        if not client: return
         sheet = client.open_by_url(st.secrets["spreadsheet_url"]).sheet1
         sheet.clear()
         rows = [["name", "active", "wins", "total", "omw", "last_teammates", "opponents", "roles"]]
@@ -65,7 +76,7 @@ def save_to_sheets(players):
                          json.dumps(p['roles'], ensure_ascii=False)])
         sheet.update('A1', rows)
     except Exception as e:
-        st.error(f"データ保存エラー: {e}")
+        st.error(f"保存エラー: {e}")
 
 # --- ロジック ---
 class ProfessionalTeamSystem:
@@ -78,8 +89,9 @@ class ProfessionalTeamSystem:
             st.session_state.page = "REGISTRATION"
 
     def calculate_win_rate(self, name):
-        p = st.session_state.players[name]
-        return p['wins'] / p['total'] if p['total'] > 0 else 0
+        p = st.session_state.players.get(name)
+        if not p or p['total'] == 0: return 0
+        return p['wins'] / p['total']
 
     def update_omw(self, match_idx, winner_side):
         res = st.session_state.matches[match_idx]
@@ -125,8 +137,9 @@ sys = ProfessionalTeamSystem()
 # --- 画面遷移 ---
 with st.sidebar:
     st.title("Let's カスタム!!")
-    st.info(f"現在の工程: {st.session_state.page}")
+    st.info(f"工程: {st.session_state.page}")
     if st.button("データ強制同期"):
+        st.cache_resource.clear()
         st.session_state.players = load_from_sheets()
         st.rerun()
     if st.button("最初からやり直す", type="secondary"):
@@ -135,135 +148,136 @@ with st.sidebar:
 
 # 1. 登録画面
 if st.session_state.page == "REGISTRATION":
-    st.header(" プレイヤー管理")
+    st.header("プレイヤー管理")
     col_f1, col_f2 = st.columns([1, 1])
+    
     with col_f1:
+        st.subheader("個別登録・更新")
         with st.form("add_p", clear_on_submit=True):
             ni = st.text_input("プレイヤー名:")
             rm = st.selectbox("メインロール", ROLES)
-            rc = st.multiselect("サブロール（複数可）", ROLES, default=[rm])
+            rc = st.multiselect("サブロール", ROLES, default=[rm])
             if st.form_submit_button("登録・更新"):
                 if ni:
                     st.session_state.players[ni] = {'roles': list(set([rm]+rc)), 'active': True, 'wins': 0, 'total': 0, 'omw': 0.0, 'last_teammates': [], 'opponents': []}
-                    save_to_sheets(st.session_state.players); st.success(f"{ni} を登録しました"); st.rerun()
+                    save_to_sheets(st.session_state.players); st.success(f"{ni} 登録完了"); st.rerun()
+
     with col_f2:
+        st.subheader("テキスト一括登録（名前とロール）")
+        bulk_text = st.text_area("「名前 (ロール1,ロール2)」の形式でペースト:", placeholder="プレイヤーA (上キャ, 中央)\nプレイヤーB (下学習)", height=150)
+        if st.button("一括適用"):
+            if bulk_text:
+                lines = bulk_text.split('\n')
+                count = 0
+                for line in lines:
+                    if "(" in line and ")" in line:
+                        # 「名前 (ロール1, ロール2)」形式の解析
+                        name_part = line.split("(")[0].strip()
+                        roles_part = line.split("(")[1].split(")")[0].strip()
+                        extracted_roles = [r.strip() for r in roles_part.split(",") if r.strip() in ROLES]
+                        
+                        if name_part:
+                            if name_part not in st.session_state.players:
+                                st.session_state.players[name_part] = {'wins':0, 'total':0, 'omw':0.0, 'last_teammates':[], 'opponents':[]}
+                            st.session_state.players[name_part].update({
+                                'roles': extracted_roles if extracted_roles else ROLES.copy(),
+                                'active': True
+                            })
+                            count += 1
+                if count > 0:
+                    save_to_sheets(st.session_state.players); st.success(f"{count}名を更新しました"); st.rerun()
+
         if st.button("全戦績をリセット"):
             for p in st.session_state.players.values(): p.update({'wins':0,'total':0,'last_teammates':[],'opponents':[]})
             save_to_sheets(st.session_state.players); st.rerun()
 
     st.divider()
     active_count = sum(1 for p in st.session_state.players.values() if p['active'])
-    st.subheader(f"参加・名簿 (現在 {active_count}名 選択中)")
-    
+    st.subheader(f"参加名簿 ({active_count}名 選択中)")
     cols = st.columns(3)
-    for i, (n, p) in enumerate(st.session_state.players.items()):
+    sorted_players = dict(sorted(st.session_state.players.items()))
+    for i, (n, p) in enumerate(sorted_players.items()):
         with cols[i % 3]:
-            with st.container():
-                st.markdown(f"<div class='player-card'>", unsafe_allow_html=True)
-                c = st.checkbox(f"**{n}** ({','.join(p['roles'])})", value=p['active'], key=f"c_{n}")
-                if c != p['active']:
-                    st.session_state.players[n]['active'] = c; save_to_sheets(st.session_state.players)
-                st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown(f"<div class='player-card'>", unsafe_allow_html=True)
+            c = st.checkbox(f"**{n}** ({','.join(p.get('roles', []))})", value=p['active'], key=f"c_{n}")
+            if c != p['active']:
+                st.session_state.players[n]['active'] = c
+                save_to_sheets(st.session_state.players)
+            st.markdown("</div>", unsafe_allow_html=True)
 
-    if st.button("ペア設定へ進む ", type="primary"):
+    if st.button("ペア設定へ進む", type="primary"):
         st.session_state.page = "PAIRING"; st.rerun()
 
+# 2. ペア設定
 elif st.session_state.page == "PAIRING":
-    st.header(" ペア固定設定")
+    st.header("ペア固定設定")
     pl = sorted([n for n, p in st.session_state.players.items() if p['active']])
     if len(pl) < 10:
-        st.warning(f"10名必要です（現在{len(pl)}名）。管理画面に戻ってチェックを入れてください。")
-        if st.button(" 戻る"): st.session_state.page = "REGISTRATION"; st.rerun()
+        st.warning(f"10名必要です（現在{len(pl)}名）。登録画面でチェックを入れてください。")
+        if st.button("戻る"): st.session_state.page = "REGISTRATION"; st.rerun()
     else:
         c1, c2 = st.columns(2)
-        da = c1.selectbox("プレイヤーA", pl)
-        db = c2.selectbox("プレイヤーB", pl)
+        da, db = c1.selectbox("プレイヤーA", pl), c2.selectbox("プレイヤーB", pl)
         if st.button("この二人を同じチームにする"):
-            st.session_state.fixed_pairs.append([da, db]); st.success(f"固定完了: {da} & {db}")
-        
+            st.session_state.fixed_pairs.append([da, db]); st.success(f"固定: {da} & {db}")
         if st.session_state.fixed_pairs:
-            st.write("現在の固定ペア:")
             for p in st.session_state.fixed_pairs: st.text(f"・{p[0]} & {p[1]}")
-            if st.button("固定をすべて解除"): st.session_state.fixed_pairs = []; st.rerun()
-        
-        if st.button("チーム分け実行 ", type="primary"):
+            if st.button("固定解除"): st.session_state.fixed_pairs = []; st.rerun()
+        if st.button("チーム分け設定へ ", type="primary"):
             st.session_state.page = "CONFIG"; st.rerun()
 
-# 3. 試合設定画面
+# 3. 設定
 elif st.session_state.page == "CONFIG":
-    st.header(" チーム分け設定")
-    tc = st.radio("生成する試合数:", [1, 2, 3], horizontal=True)
-    mode = st.toggle("勝率バランスを考慮する", value=True)
-    
-    if st.button("チームを自動生成！", type="primary"):
+    st.header("チーム分け設定")
+    tc = st.radio("試合数:", [1, 2, 3], horizontal=True)
+    mode = st.toggle("勝率バランス考慮", value=True)
+    if st.button("チーム生成！", type="primary"):
         act_n = [n for n, p in st.session_state.players.items() if p['active']]
-        # 優先順位付け
-        np = [n for n in act_n if n not in st.session_state.last_match_players]
-        pl_prev = [n for n in act_n if n in st.session_state.last_match_players]
+        np, pl_prev = [n for n in act_n if n not in st.session_state.last_match_players], [n for n in act_n if n in st.session_state.last_match_players]
         random.shuffle(np); random.shuffle(pl_prev); sel = (np + pl_prev)[:tc*10]
         st.session_state.last_match_players = sel
-        
-        st.session_state.matches = []
-        for i in range(tc):
-            st.session_state.matches.append(sys.solve_best_distribution(sel[i*10:(i+1)*10], mode))
+        st.session_state.matches = [sys.solve_best_distribution(sel[i*10:(i+1)*10], mode) for i in range(tc)]
         st.session_state.page = "RESULT"; st.rerun()
 
-# 4. 試合結果入力（ここが今回のメイン改善）
+# 4. 結果入力
 elif st.session_state.page == "RESULT":
     st.header(" 対戦カード & 結果入力")
     for i, m in enumerate(st.session_state.matches):
         if not m: continue
         st.subheader(f"第 {i+1} 試合")
         col_r, col_w = st.columns(2)
-        
         with col_r:
-            st.markdown(f"<div class='red-team'><h3>赤チーム {'⚠️' if m['warn'] else ''}</h3>", unsafe_allow_html=True)
+            st.markdown(f"<div class='red-team'><h3>赤 {'⚠️' if m['warn'] else ''}</h3>", unsafe_allow_html=True)
             for r, n in m["赤チーム"].items(): st.write(f"**{r}**: {n}")
-            if st.button(f"赤チームの勝利！", key=f"win_r_{i}", disabled=m["done"]):
-                sys.update_omw(i, "赤チーム"); m["done"] = True
-                st.balloons()
-                st.success("結果を保存しました。ペア設定画面に戻ります。")
-                st.session_state.page = "PAIRING" # ペア設定画面へ戻る（やり直し可能）
-                st.rerun()
+            if st.button(f"赤勝利", key=f"win_r_{i}", disabled=m["done"]):
+                sys.update_omw(i, "赤チーム"); m["done"] = True; st.balloons(); st.session_state.page = "PAIRING"; st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
-            
         with col_w:
-            st.markdown(f"<div class='white-team'><h3>白チーム</h3>", unsafe_allow_html=True)
+            st.markdown(f"<div class='white-team'><h3>白</h3>", unsafe_allow_html=True)
             for r, n in m["白チーム"].items(): st.write(f"**{r}**: {n}")
-            if st.button(f"白チームの勝利！", key=f"win_w_{i}", disabled=m["done"]):
-                sys.update_omw(i, "白チーム"); m["done"] = True
-                st.balloons()
-                st.success("結果を保存しました。ペア設定画面に戻ります。")
-                st.session_state.page = "PAIRING" # ペア設定画面へ戻る（やり直し可能）
-                st.rerun()
+            if st.button(f"白勝利", key=f"win_w_{i}", disabled=m["done"]):
+                sys.update_omw(i, "白チーム"); m["done"] = True; st.balloons(); st.session_state.page = "PAIRING"; st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
-    
-    st.divider()
-    if st.button("全試合を終えて戦績を確認する"):
-        st.session_state.page = "SUMMARY"; st.rerun()
+    if st.button("最終戦績を確認する"): st.session_state.page = "SUMMARY"; st.rerun()
 
-# 5. 戦績表示（勝率順に並び替え）
+# 5. 戦績（表示項目を限定 & コピー用エリア追加）
 elif st.session_state.page == "SUMMARY":
     st.header("本日の戦績ランキング")
-    data_list = []
-    for n, p in st.session_state.players.items():
+    data_list, copy_list = [], []
+    for n, p in sorted(st.session_state.players.items()):
         if p['total'] > 0:
             wr = sys.calculate_win_rate(n)
-            data_list.append({
-                "名前": n,
-                "勝率数値": wr, # ソート用
-                "勝率": f"{int(wr*100)}%",
-                "試合数": p['total'],
-                "勝ち": p['wins'],
-                "負け": p['total'] - p['wins']
-            })
+            data_list.append({"名前": n, "勝率数値": wr, "勝率": f"{int(wr*100)}%", "勝ち": p['wins'], "負け": p['total'] - p['wins'], "OMW%": f"{p['omw']:.2f}%"})
+        if p['active']:
+            copy_list.append(f"{n} ({', '.join(p['roles'])})")
     
     if data_list:
-        # 勝率数値で降順ソート
-        df = pd.DataFrame(data_list).sort_values(by="勝率数値", ascending=False).drop(columns=["勝率数値"])
-        st.table(df)
+        st.table(pd.DataFrame(data_list).sort_values(by="勝率数値", ascending=False).drop(columns=["勝率数値"]))
     else:
-        st.info("まだ試合データがありません。")
+        st.info("試合データがありません。")
 
-    if st.button("トップ（登録画面）に戻る"):
-        st.session_state.page = "REGISTRATION"; st.rerun()
+    st.divider()
+    st.subheader("次回用コピーテキスト ")
+    st.text_area("登録画面の「一括登録」にペーストできます:", value="\n".join(copy_list), height=150)
+
+    if st.button("登録画面に戻る"): st.session_state.page = "REGISTRATION"; st.rerun()
