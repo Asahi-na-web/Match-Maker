@@ -93,7 +93,7 @@ class ProfessionalTeamSystem:
                 p['opponents'].extend(o); p['last_teammates'] = m
         save_to_sheets(st.session_state.players)
 
-   def solve_best_distribution(self, names, balance_mode):
+    def solve_best_distribution(self, names, balance_mode):
         pool = list(combinations(names, 5))
         random.shuffle(pool)
         cands = []
