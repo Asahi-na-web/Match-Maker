@@ -93,38 +93,55 @@ class ProfessionalTeamSystem:
                 p['opponents'].extend(o); p['last_teammates'] = m
         save_to_sheets(st.session_state.players)
 
-    def solve_best_distribution(self, names, balance_mode):
-        pool = list(combinations(names, 5)); random.shuffle(pool); cands = []
+   def solve_best_distribution(self, names, balance_mode):
+        pool = list(combinations(names, 5))
+        random.shuffle(pool)
+        cands = []
         
         for ta in pool:
             tb = [n for n in names if n not in ta]
-            # 固定ペアチェック
-            pf = any((p[0] in ta and p[1] not in ta) or (p[0] in tb and p[1] not in tb) for p in st.session_state.fixed_pairs)
+            
+            # --- 【修正】ペア固定の絶対遵守 ---
+            # ペアの二人が「別々のチーム」に分かれている場合は、この組み合わせを破棄する
+            pf_violation = any((p[0] in ta and p[1] not in ta) or (p[0] in tb and p[1] not in tb) for p in st.session_state.fixed_pairs)
+            if pf_violation:
+                continue # この組み合わせは絶対に採用しない
             
             ra, score_a, wa = self.assign_roles_flexible(ta)
             rb, score_b, wb = self.assign_roles_flexible(tb)
             
+            # ロールが一人でも割り当てられない（希望外）場合は警告フラグ
+            warn = (wa or wb)
+            
             # 再会率（前回チームメイトだった数）
             rep = sum(len(set(st.session_state.players[n].get('last_teammates', [])) & set(ta)) for n in ta)
-            
-            d = {"赤チーム": ra, "白チーム": rb, "warn": (wa or wb or pf), "rep": rep, "done": False, "role_score": score_a + score_b}
             
             # 勝率計算
             wa_list = [self.calculate_win_rate(n) for n in ta]
             wb_list = [self.calculate_win_rate(n) for n in tb]
-            d["diff"] = abs(sum(wa_list) - sum(wb_list))
-            d["var_diff"] = abs(np.var(wa_list) - np.var(wb_list))
+            diff = abs(sum(wa_list) - sum(wb_list))
+            var_diff = abs(np.var(wa_list) - np.var(wb_list))
+            
+            d = {
+                "赤チーム": ra, "白チーム": rb, "warn": warn, 
+                "rep": rep, "done": False, "role_score": score_a + score_b,
+                "diff": diff, "var_diff": var_diff
+            }
             
             cands.append(d)
-            if len(cands) > 500: break
+            if len(cands) > 1000: break # 探索効率のため
+
+        if not cands:
+            # 万が一、ペア設定が多すぎて組み合わせがない場合のフォールバック
+            st.error("エラー: 指定されたペア固定条件を満たすチーム分けが見つかりませんでした。ペアを減らすか、メンバーを変更してください。")
+            return None
 
         if balance_mode:
-            # 勝率合計の差 -> 分散の差 -> ロール満足度の順で最適化（再会制限なし）
-            return min(cands, key=lambda x: (x["diff"], x["var_diff"], -x["role_score"]))
+            # 勝率バランス優先：1.合計差, 2.分散差, 3.ロール満足度, 4.不成立警告, 5.再会率
+            return min(cands, key=lambda x: (x["diff"], x["var_diff"], -x["role_score"], x["warn"], x["rep"]))
         else:
-            # 再会率(低) -> ロール満足度(高) -> 勝率差の順で最適化
+            # 通常モード：1.再会率(低), 2.ロール満足度(高), 3.不成立警告, 4.勝率差
             return min(cands, key=lambda x: (x["rep"], -x["role_score"], x["warn"], x["diff"]))
-
     def assign_roles_flexible(self, members):
         best_assignment, max_score = None, -1
         for p in permutations(members):
