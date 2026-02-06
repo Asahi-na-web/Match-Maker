@@ -173,10 +173,10 @@ with st.sidebar:
 
 # 1. 登録画面
 if st.session_state.page == "REGISTRATION":
-    st.header("👤 プレイヤー管理")
+    st.header("プレイヤー管理")
     col_f1, col_f2 = st.columns(2)
     with col_f1:
-        st.subheader("📝 個別登録・更新")
+        st.subheader("個別登録・更新")
         with st.form("add_p", clear_on_submit=True):
             ni = st.text_input("プレイヤー名:")
             rm = st.selectbox("メインロール (第一希望)", ROLES)
@@ -188,7 +188,7 @@ if st.session_state.page == "REGISTRATION":
                     st.session_state.players[ni] = {'roles': final_roles, 'active': True, 'wins': 0, 'total': 0, 'omw': 0.0, 'last_teammates': [], 'opponents': []}
                     save_to_sheets(st.session_state.players); st.success(f"{ni} 登録完了"); st.rerun()
     with col_f2:
-        st.subheader("📋 テキスト一括登録")
+        st.subheader("テキスト一括登録")
         bulk_text = st.text_area("形式: 名前 (第一, その他1...)", placeholder="A (中央, 上キャ)\nB (下学習)", height=150)
         if st.button("一括適用"):
             if bulk_text:
@@ -212,11 +212,11 @@ if st.session_state.page == "REGISTRATION":
             if st.checkbox(f"**{n}**\n({r_disp})", value=p['active'], key=f"c_{n}") != p['active']:
                 st.session_state.players[n]['active'] = not p['active']; save_to_sheets(st.session_state.players); st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
-    if st.button("ペア設定へ進む ➡️", type="primary"): st.session_state.page = "PAIRING"; st.rerun()
+    if st.button("ペア設定へ進む", type="primary"): st.session_state.page = "PAIRING"; st.rerun()
 
 # 2. ペア設定
 elif st.session_state.page == "PAIRING":
-    st.header("🔗 ペア固定設定")
+    st.header("ペア固定設定")
     pl = sorted([n for n, p in st.session_state.players.items() if p['active']])
     if len(pl) < 10:
         st.warning(f"現在{len(pl)}名です。10名選んでください。"); st.button("戻る", on_click=lambda: setattr(st.session_state, 'page', 'REGISTRATION'))
@@ -226,11 +226,11 @@ elif st.session_state.page == "PAIRING":
         if st.button("二人を同じチームにする"): st.session_state.fixed_pairs.append([da, db]); st.success("固定しました")
         for p in st.session_state.fixed_pairs: st.text(f"・{p[0]} & {p[1]}")
         if st.button("固定解除"): st.session_state.fixed_pairs = []; st.rerun()
-        if st.button("チーム分け設定へ ➡️", type="primary"): st.session_state.page = "CONFIG"; st.rerun()
+        if st.button("チーム分け設定へ", type="primary"): st.session_state.page = "CONFIG"; st.rerun()
 
 # 3. 設定
 elif st.session_state.page == "CONFIG":
-    st.header("⚙️ チーム分け設定")
+    st.header("チーム分け設定")
     tc = st.radio("試合数:", [1, 2, 3], horizontal=True)
     mode = st.toggle("勝率バランス優先モード", value=True, help="ON: 勝率と分散を均一化。OFF: 前回の味方を避ける。")
     if st.button("チーム生成！", type="primary"):
@@ -243,7 +243,7 @@ elif st.session_state.page == "CONFIG":
 
 # 4. 結果入力
 elif st.session_state.page == "RESULT":
-    st.header("🎮 対戦カード")
+    st.header("対戦カード")
     for i, m in enumerate(st.session_state.matches):
         if not m: continue
         st.subheader(f"第 {i+1} 試合")
@@ -261,7 +261,7 @@ elif st.session_state.page == "RESULT":
 
 # 5. 戦績
 elif st.session_state.page == "SUMMARY":
-    st.header("📊 本日の戦績")
+    st.header("本日の戦績")
     res_data = []
     for n, p in st.session_state.players.items():
         if p['total'] > 0:
@@ -269,7 +269,7 @@ elif st.session_state.page == "SUMMARY":
             res_data.append({"名前": n, "勝率": f"{int(wr*100)}%", "勝": p['wins'], "負": p['total']-p['wins'], "rate": wr})
     if res_data: st.table(pd.DataFrame(res_data).sort_values("rate", ascending=False).drop(columns="rate"))
     
-    st.subheader("📋 次回用一括登録テキスト")
+    st.subheader("次回用一括登録テキスト")
     copy_text = "\n".join([f"{n} ({', '.join(p['roles'])})" for n, p in st.session_state.players.items() if p['active']])
     st.text_area("コピーして再利用:", value=copy_text, height=150)
     if st.button("登録画面へ戻る"): st.session_state.page = "REGISTRATION"; st.rerun()
