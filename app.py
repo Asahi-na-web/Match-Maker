@@ -67,14 +67,13 @@ def save_to_sheets(players):
         client = get_gspread_client()
         if not client: return
         sheet = client.open_by_url(st.secrets["spreadsheet_url"]).sheet1
-        sheet.clear()
         rows = [["name", "active", "wins", "total", "omw", "last_teammates", "opponents", "roles"]]
         for n, p in players.items():
             rows.append([n, int(p['active']), p['wins'], p['total'], p['omw'],
                          json.dumps(p['last_teammates'], ensure_ascii=False),
                          json.dumps(p['opponents'], ensure_ascii=False),
                          json.dumps(p['roles'], ensure_ascii=False)])
-        sheet.update('A1', rows)
+        sheet.update(values=rows, range_name='A1', value_input_option='USER_ENTERED')
     except Exception as e:
         st.error(f"保存エラー: {e}")
 
@@ -111,26 +110,55 @@ class ProfessionalTeamSystem:
             tb = [n for n in names if n not in ta]; pf = False
             for p in st.session_state.fixed_pairs:
                 if (p[0] in ta and p[1] not in ta) or (p[0] in tb and p[1] not in tb): pf = True; break
-            ra, wa = self.assign_roles_flexible(ta); rb, wb = self.assign_roles_flexible(tb); rep = 0
+            
+            ra, score_a, wa = self.assign_roles_flexible(ta)
+            rb, score_b, wb = self.assign_roles_flexible(tb)
+            
+            rep = 0
             for n in ta: rep += len(set(st.session_state.players[n].get('last_teammates', [])) & set(ta))
-            d = {"赤チーム": ra, "白チーム": rb, "warn": (wa or wb or pf), "rep": rep, "done": False}
+            
+            # ロール満足度（高いほど良い）を考慮
+            d = {"赤チーム": ra, "白チーム": rb, "warn": (wa or wb or pf), "rep": rep, "done": False, "role_score": score_a + score_b}
+            
             if balance_mode:
                 wa_list = [self.calculate_win_rate(n) for n in ta]; wb_list = [self.calculate_win_rate(n) for n in tb]
                 d["diff"] = abs(sum(wa_list) - sum(wb_list))
+            
             if not d["warn"] and rep <= 2: cands.append(d)
             else: fallback_cands.append(d)
             if len(cands) > 50: break
+            
         res_list = cands if cands else fallback_cands
-        return min(res_list, key=lambda x: (x.get("diff", 0), x["warn"], x["rep"])) if res_list else None
+        # ソート優先順位: 1.勝率差, 2.ロール満足度(降順), 3.不成立警告, 4.再会率
+        return min(res_list, key=lambda x: (x.get("diff", 0), -x["role_score"], x["warn"], x["rep"])) if res_list else None
 
     def assign_roles_flexible(self, members):
+        best_assignment = None
+        max_role_score = -1
+        
         for p in permutations(members):
-            t = {}
+            current_assignment = {}
+            current_score = 0
+            possible = True
             for i, r in enumerate(ROLES):
-                if r in st.session_state.players[p[i]]['roles']: t[r] = p[i]
-                else: break
-            if len(t) == 5: return t, False
-        return {ROLES[i]: members[i] for i in range(5)}, True
+                p_roles = st.session_state.players[p[i]]['roles']
+                if r in p_roles:
+                    current_assignment[r] = p[i]
+                    # 第一希望(インデックス0)ならスコア+10, その他なら+1
+                    current_score += 10 if p_roles[0] == r else 1
+                else:
+                    possible = False
+                    break
+            
+            if possible:
+                if current_score > max_role_score:
+                    max_role_score = current_score
+                    best_assignment = current_assignment
+                    if max_role_score == 50: break # 全員第一希望なら即終了
+        
+        if best_assignment:
+            return best_assignment, max_role_score, False
+        return {ROLES[i]: members[i] for i in range(5)}, 0, True
 
 sys = ProfessionalTeamSystem()
 
@@ -155,25 +183,27 @@ if st.session_state.page == "REGISTRATION":
         st.subheader("個別登録・更新")
         with st.form("add_p", clear_on_submit=True):
             ni = st.text_input("プレイヤー名:")
-            rm = st.selectbox("メインロール", ROLES)
-            rc = st.multiselect("サブロール", ROLES, default=[rm])
+            rm = st.selectbox("メインロール (第一希望)", ROLES)
+            rc = st.multiselect("サブロール (その他希望)", [r for r in ROLES if r != rm])
             if st.form_submit_button("登録・更新"):
                 if ni:
-                    st.session_state.players[ni] = {'roles': list(set([rm]+rc)), 'active': True, 'wins': 0, 'total': 0, 'omw': 0.0, 'last_teammates': [], 'opponents': []}
+                    # 第一希望を先頭にする
+                    ordered_roles = [rm] + rc
+                    st.session_state.players[ni] = {'roles': ordered_roles, 'active': True, 'wins': 0, 'total': 0, 'omw': 0.0, 'last_teammates': [], 'opponents': []}
                     save_to_sheets(st.session_state.players); st.success(f"{ni} 登録完了"); st.rerun()
 
     with col_f2:
-        st.subheader("テキスト一括登録（名前とロール）")
-        bulk_text = st.text_area("「名前 (ロール1,ロール2)」の形式でペースト:", placeholder="プレイヤーA (上キャ, 中央)\nプレイヤーB (下学習)", height=150)
+        st.subheader("テキスト一括登録")
+        bulk_text = st.text_area("「名前 (第一, その他1, ...)」の形式でペースト:", placeholder="プレイヤーA (上キャ, 中央)\nプレイヤーB (下学習)", height=150)
         if st.button("一括適用"):
             if bulk_text:
                 lines = bulk_text.split('\n')
                 count = 0
                 for line in lines:
                     if "(" in line and ")" in line:
-                        # 「名前 (ロール1, ロール2)」形式の解析
                         name_part = line.split("(")[0].strip()
                         roles_part = line.split("(")[1].split(")")[0].strip()
+                        # 入力された順序を維持して抽出
                         extracted_roles = [r.strip() for r in roles_part.split(",") if r.strip() in ROLES]
                         
                         if name_part:
@@ -199,7 +229,10 @@ if st.session_state.page == "REGISTRATION":
     for i, (n, p) in enumerate(sorted_players.items()):
         with cols[i % 3]:
             st.markdown(f"<div class='player-card'>", unsafe_allow_html=True)
-            c = st.checkbox(f"**{n}** ({','.join(p.get('roles', []))})", value=p['active'], key=f"c_{n}")
+            # ロール表示の先頭に「★」をつけて第一希望を明示
+            display_roles = p.get('roles', [])
+            role_str = f"★{display_roles[0]}, {', '.join(display_roles[1:])}" if display_roles else ""
+            c = st.checkbox(f"**{n}** ({role_str})", value=p['active'], key=f"c_{n}")
             if c != p['active']:
                 st.session_state.players[n]['active'] = c
                 save_to_sheets(st.session_state.players)
@@ -208,7 +241,7 @@ if st.session_state.page == "REGISTRATION":
     if st.button("ペア設定へ進む", type="primary"):
         st.session_state.page = "PAIRING"; st.rerun()
 
-# 2. ペア設定
+# 2. ペア設定 (ロジック変更なし)
 elif st.session_state.page == "PAIRING":
     st.header("ペア固定設定")
     pl = sorted([n for n, p in st.session_state.players.items() if p['active']])
@@ -223,10 +256,10 @@ elif st.session_state.page == "PAIRING":
         if st.session_state.fixed_pairs:
             for p in st.session_state.fixed_pairs: st.text(f"・{p[0]} & {p[1]}")
             if st.button("固定解除"): st.session_state.fixed_pairs = []; st.rerun()
-        if st.button("チーム分け設定へ ", type="primary"):
+        if st.button("チーム分け設定へ", type="primary"):
             st.session_state.page = "CONFIG"; st.rerun()
 
-# 3. 設定
+# 3. 設定 (ロジック変更なし)
 elif st.session_state.page == "CONFIG":
     st.header("チーム分け設定")
     tc = st.radio("試合数:", [1, 2, 3], horizontal=True)
@@ -239,36 +272,43 @@ elif st.session_state.page == "CONFIG":
         st.session_state.matches = [sys.solve_best_distribution(sel[i*10:(i+1)*10], mode) for i in range(tc)]
         st.session_state.page = "RESULT"; st.rerun()
 
-# 4. 結果入力
+# 4. 結果入力 (ロジック変更なし)
 elif st.session_state.page == "RESULT":
-    st.header(" 対戦カード & 結果入力")
+    st.header("対戦カード & 結果入力")
     for i, m in enumerate(st.session_state.matches):
         if not m: continue
         st.subheader(f"第 {i+1} 試合")
         col_r, col_w = st.columns(2)
         with col_r:
             st.markdown(f"<div class='red-team'><h3>赤 {'⚠️' if m['warn'] else ''}</h3>", unsafe_allow_html=True)
-            for r, n in m["赤チーム"].items(): st.write(f"**{r}**: {n}")
+            for r, n in m["赤チーム"].items():
+                p_roles = st.session_state.players[n]['roles']
+                is_main = " (希望)" if p_roles[0] == r else ""
+                st.write(f"**{r}**: {n}{is_main}")
             if st.button(f"赤勝利", key=f"win_r_{i}", disabled=m["done"]):
                 sys.update_omw(i, "赤チーム"); m["done"] = True; st.balloons(); st.session_state.page = "PAIRING"; st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
         with col_w:
             st.markdown(f"<div class='white-team'><h3>白</h3>", unsafe_allow_html=True)
-            for r, n in m["白チーム"].items(): st.write(f"**{r}**: {n}")
+            for r, n in m["白チーム"].items():
+                p_roles = st.session_state.players[n]['roles']
+                is_main = " (希望)" if p_roles[0] == r else ""
+                st.write(f"**{r}**: {n}{is_main}")
             if st.button(f"白勝利", key=f"win_w_{i}", disabled=m["done"]):
                 sys.update_omw(i, "白チーム"); m["done"] = True; st.balloons(); st.session_state.page = "PAIRING"; st.rerun()
             st.markdown("</div>", unsafe_allow_html=True)
     if st.button("最終戦績を確認する"): st.session_state.page = "SUMMARY"; st.rerun()
 
-# 5. 戦績（表示項目を限定 & コピー用エリア追加）
+# 5. 戦績 (表示形式の修正)
 elif st.session_state.page == "SUMMARY":
     st.header("本日の戦績ランキング")
     data_list, copy_list = [], []
     for n, p in sorted(st.session_state.players.items()):
         if p['total'] > 0:
             wr = sys.calculate_win_rate(n)
-            data_list.append({"名前": n, "勝率数値": wr, "勝率": f"{int(wr*100)}%", "勝ち": p['wins'], "負け": p['total'] - p['wins'], "OMW%": f"{p['omw']:.2f}%"})
+            data_list.append({"名前": n, "勝率数値": wr, "勝率": f"{int(wr*100)}%", "勝ち": p['wins'], "負け": p['total'] - p['wins']})
         if p['active']:
+            # 第一希望を先頭にした文字列を作成
             copy_list.append(f"{n} ({', '.join(p['roles'])})")
     
     if data_list:
@@ -277,7 +317,7 @@ elif st.session_state.page == "SUMMARY":
         st.info("試合データがありません。")
 
     st.divider()
-    st.subheader("次回用コピーテキスト ")
-    st.text_area("登録画面の「一括登録」にペーストできます:", value="\n".join(copy_list), height=150)
+    st.subheader("次回用コピーテキスト (第一希望優先)")
+    st.text_area("一括登録にそのまま利用可能:", value="\n".join(copy_list), height=150)
 
     if st.button("登録画面に戻る"): st.session_state.page = "REGISTRATION"; st.rerun()
