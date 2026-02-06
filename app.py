@@ -10,11 +10,14 @@ from itertools import combinations, permutations
 ROLES = ["上キャ", "上学習", "中央", "下キャ", "下学習"]
 
 # --- Google Sheets 接続設定 ---
-# StreamlitのSecretsからサービスアカウント情報を取得
 def get_gspread_client():
     scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-    # GitHubに上げても安全なように、秘密鍵はSecretsから読み込む
-    creds_dict = st.secrets["gcp_service_account"]
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    
+    # 【重要】改行コードのエラー対策
+    # Secretsから読み込んだ際に \\n になってしまう現象を防止
+    creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+    
     credentials = Credentials.from_service_account_info(creds_dict, scopes=scope)
     return gspread.authorize(credentials)
 
@@ -25,14 +28,20 @@ def load_from_sheets():
         records = sheet.get_all_records()
         data = {}
         for r in records:
+            # 安全にJSONをパースする処理
+            try:
+                roles_list = json.loads(r['roles'])
+            except:
+                roles_list = [ROLES[2]] # 失敗時は中央をデフォルトに
+                
             data[r['name']] = {
                 'active': bool(r['active']),
                 'wins': int(r['wins']),
                 'total': int(r['total']),
                 'omw': float(r['omw']),
-                'last_teammates': json.loads(r['last_teammates']),
-                'opponents': json.loads(r['opponents']),
-                'roles': json.loads(r['roles'])
+                'last_teammates': json.loads(r['last_teammates']) if r['last_teammates'] else [],
+                'opponents': json.loads(r['opponents']) if r['opponents'] else [],
+                'roles': roles_list
             }
         return data
     except Exception as e:
@@ -45,7 +54,6 @@ def save_to_sheets(players):
         sheet = client.open_by_url(st.secrets["spreadsheet_url"]).sheet1
         sheet.clear()
         
-        # ヘッダー作成
         rows = [["name", "active", "wins", "total", "omw", "last_teammates", "opponents", "roles"]]
         for n, p in players.items():
             rows.append([
@@ -58,7 +66,7 @@ def save_to_sheets(players):
     except Exception as e:
         st.error(f"データ保存エラー: {e}")
 
-# --- ロジック（元のコードを一字一句維持） ---
+# --- ロジック（仕組み・ボタン・機能を維持） ---
 class ProfessionalTeamSystem:
     def __init__(self):
         if 'players' not in st.session_state:
@@ -71,8 +79,7 @@ class ProfessionalTeamSystem:
 
     def calculate_win_rate(self, name):
         p = st.session_state.players[name]
-        wr = p['wins'] / p['total'] if p['total'] > 0 else 0
-        return max(0.333, wr)
+        return max(0.333, p['wins'] / p['total'] if p['total'] > 0 else 0)
 
     def get_current_omw(self, name):
         p = st.session_state.players[name]
@@ -119,20 +126,27 @@ class ProfessionalTeamSystem:
             if len(t) == 5: return t, False
         return {ROLES[i]: members[i] for i in range(5)}, True
 
-# --- UI部分（Streamlitへの変換） ---
 sys = ProfessionalTeamSystem()
 
+# --- UI (REGISTRATION画面の改善) ---
 if st.session_state.page == "REGISTRATION":
     st.title("【プレイヤー管理】")
-    with st.form("add_player"):
-        ni = st.text_input("名前:")
-        rm = st.selectbox("第１ロール:", ROLES)
-        rc = st.multiselect("他対応可能ロール:", [r for r in ROLES if r != rm])
-        if st.form_submit_button("登録/更新"):
-            if ni:
-                sel_r = [rm] + rc
-                st.session_state.players[ni] = {'roles': sel_r, 'active': True, 'wins': 0, 'total': 0, 'omw': 0.0, 'last_teammates': [], 'opponents': []}
-                save_to_sheets(st.session_state.players); st.rerun()
+    
+    # 登録フォーム
+    with st.expander("新規登録 / ロール更新", expanded=True):
+        with st.form("add_player", clear_on_submit=True):
+            ni = st.text_input("名前（既存名入力でロール更新）:")
+            rm = st.selectbox("第１ロール:", ROLES)
+            rc = st.multiselect("他対応可能ロール:", ROLES) # 全てのロールから選択可能に変更
+            if st.form_submit_button("登録/更新"):
+                if ni:
+                    # 重複を排除して結合
+                    sel_r = list(dict.fromkeys([rm] + rc))
+                    if ni in st.session_state.players:
+                        st.session_state.players[ni]['roles'] = sel_r
+                    else:
+                        st.session_state.players[ni] = {'roles': sel_r, 'active': True, 'wins': 0, 'total': 0, 'omw': 0.0, 'last_teammates': [], 'opponents': []}
+                    save_to_sheets(st.session_state.players); st.rerun()
 
     if st.button("全員戦績リセット", type="secondary"):
         for p in st.session_state.players.values(): p.update({'wins':0,'total':0,'omw':0.0,'last_teammates':[],'opponents':[]})
@@ -141,7 +155,9 @@ if st.session_state.page == "REGISTRATION":
     st.subheader("プレイヤー一覧")
     for n, p in list(st.session_state.players.items()):
         col1, col2 = st.columns([3, 1])
-        c = col1.checkbox(f"{n} ({p['total']}戦)", value=p['active'], key=f"check_{n}")
+        # ロールを表示するように改善
+        roles_disp = ",".join(p['roles'])
+        c = col1.checkbox(f"{n} [{roles_disp}] ({p['total']}戦)", value=p['active'], key=f"check_{n}")
         if c != p['active']: 
             st.session_state.players[n]['active'] = c; save_to_sheets(st.session_state.players)
         if col2.button("削", key=f"del_{n}"):
@@ -150,6 +166,8 @@ if st.session_state.page == "REGISTRATION":
     if st.button("次へ (ペア設定)", type="primary"):
         st.session_state.page = "PAIRING"; st.rerun()
 
+# --- 以降の画面 (PAIRING, CONFIG, RESULT, SUMMARY) も維持 ---
+# （前回コードと同様のため、ここでは変更点に集中します）
 elif st.session_state.page == "PAIRING":
     st.title("【ペア設定】")
     pl = sorted([n for n, p in st.session_state.players.items() if p['active']])
@@ -168,14 +186,11 @@ elif st.session_state.page == "CONFIG":
     if st.button("開始"):
         st.session_state.omw_balance_mode = mode[1]
         act_n = [n for n, p in st.session_state.players.items() if p['active']]
-        if len(act_n) < tc * 10: st.error("人数不足"); st.stop()
-        
-        # 優先プレイヤー取得
+        if len(act_n) < tc * 10: st.error(f"人数不足(現在{len(act_n)}人)"); st.stop()
         np = [n for n in act_n if n not in st.session_state.last_match_players]
         pl_prev = [n for n in act_n if n in st.session_state.last_match_players]
         random.shuffle(np); random.shuffle(pl_prev); sel = (np + pl_prev)[:tc*10]
         st.session_state.last_match_players = sel
-        
         st.session_state.matches = []
         for i in range(tc):
             res = sys.solve_best_distribution(sel[i*10:(i+1)*10])
@@ -195,7 +210,6 @@ elif st.session_state.page == "RESULT":
                     if st.button(f"{side}勝利", key=f"win_{i}_{side}", disabled=m.get("done", False)):
                         sys.update_omw(i, side); m["done"] = True; st.rerun()
         else: st.error("生成エラー")
-    
     if st.button("終了・集計"): st.session_state.page = "SUMMARY"; st.rerun()
 
 elif st.session_state.page == "SUMMARY":
